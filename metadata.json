@@ -1,0 +1,7 @@
+{
+  "name": "Smart Hairstyle Finder",
+  "description": "AI-powered hairstyle recommendations and virtual try-on based on face shape analysis.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

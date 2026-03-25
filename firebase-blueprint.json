@@ -1,0 +1,40 @@
+{
+  "entities": {
+    "users": {
+      "title": "User Profile",
+      "description": "Stores user preferences and favorite hairstyles.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "User ID from Firebase Auth" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "favorites": { "type": "array", "items": { "type": "string" }, "description": "List of favorite hairstyle IDs" }
+      },
+      "required": ["uid", "email"]
+    },
+    "favorites": {
+      "title": "Favorite Hairstyle",
+      "description": "Stores a user's favorite hairstyle with the original image.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "hairstyleId": { "type": "string" },
+        "originalImage": { "type": "string", "description": "Base64 or URL of the original face image" },
+        "styledImage": { "type": "string", "description": "Base64 of the image with the hairstyle applied" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "hairstyleId", "originalImage", "styledImage"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "users",
+      "description": "User profile document"
+    },
+    "/users/{userId}/favorites/{favoriteId}": {
+      "schema": "favorites",
+      "description": "User's saved styled images"
+    }
+  }
+}
