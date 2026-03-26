@@ -3,6 +3,66 @@ import { AnalysisResult, FaceShape, Hairstyle } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
+async function resizeImage(base64Str: string, maxWidth = 800): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const timeout = setTimeout(() => reject(new Error("Image load timeout")), 5000);
+    img.onload = () => {
+      clearTimeout(timeout);
+      const canvas = document.createElement('canvas');
+      let width = img.width;
+      let height = img.height;
+
+      if (width > maxWidth) {
+        height = (maxWidth / width) * height;
+        width = maxWidth;
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx?.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', 0.6));
+    };
+    img.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error("Image load error"));
+    };
+    img.src = base64Str;
+  });
+}
+
+async function retryWithBackoff<T>(fn: () => Promise<T>, maxRetries = 50, initialDelay = 1000): Promise<T> {
+  let delay = initialDelay;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      // Image generation can take time, especially under load. 60s timeout per attempt.
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("Request timeout")), 60000)
+      );
+      return await Promise.race([fn(), timeoutPromise]) as T;
+    } catch (error: any) {
+      const isRetryable = error?.message?.includes('429') || 
+                          error?.status === 'RESOURCE_EXHAUSTED' || 
+                          error?.message?.includes('quota') ||
+                          error?.message?.includes('busy') ||
+                          error?.message?.includes('timeout') ||
+                          error?.message?.includes('deadline');
+      
+      if (isRetryable && i < maxRetries - 1) {
+        // Jittered backoff to avoid synchronized retries
+        const jitter = Math.random() * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay + jitter));
+        // Cap the delay at 10 seconds to keep it responsive but persistent
+        delay = Math.min(delay * 1.4, 10000); 
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("AI_BUSY");
+}
+
 export const HAIRSTYLES: Hairstyle[] = [
   // Trending / Instagram Reel Styles
   {
@@ -156,106 +216,112 @@ export const HAIRSTYLES: Hairstyle[] = [
 ];
 
 export async function analyzeFace(base64Image: string): Promise<AnalysisResult> {
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: [
-      {
+  // Smaller image for faster analysis (400px is plenty for face shape)
+  const resizedImage = await resizeImage(base64Image, 400);
+  return retryWithBackoff(async () => {
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-lite-preview",
+      contents: [
+        {
+          parts: [
+            {
+              inlineData: {
+                mimeType: "image/jpeg",
+                data: resizedImage.split(',')[1],
+              },
+            },
+            {
+              text: `Analyze this face for hairstyle recommendations. 
+              Identify the face shape (oval, round, square, heart, diamond).
+              Analyze the jawline, forehead width, face length, and hairline.
+              Provide suitability scores (0-100) and reasons for each of these hairstyles: ${HAIRSTYLES.map(h => h.name).join(', ')}.
+              Return the result in JSON format.`,
+            },
+          ],
+        },
+      ],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            faceShape: { type: Type.STRING, enum: ['oval', 'round', 'square', 'heart', 'diamond'] },
+            features: {
+              type: Type.OBJECT,
+              properties: {
+                jawline: { type: Type.STRING },
+                forehead: { type: Type.STRING },
+                faceLength: { type: Type.STRING },
+                hairline: { type: Type.STRING },
+              },
+              required: ['jawline', 'forehead', 'faceLength', 'hairline'],
+            },
+            recommendations: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  suitability: { type: Type.NUMBER },
+                  reason: { type: Type.STRING },
+                },
+                required: ['name', 'suitability', 'reason'],
+              },
+            },
+          },
+          required: ['faceShape', 'features', 'recommendations'],
+        },
+      },
+    });
+
+    const data = JSON.parse(response.text);
+    
+    // Map recommendations back to HAIRSTYLES
+    const recommendations: Hairstyle[] = HAIRSTYLES.map(h => {
+      const rec = data.recommendations.find((r: any) => r.name === h.name);
+      return {
+        ...h,
+        suitability: rec?.suitability || 0,
+        reason: rec?.reason || 'Recommended based on your face shape.'
+      };
+    }).sort((a, b) => b.suitability - a.suitability);
+
+    return {
+      faceShape: data.faceShape as FaceShape,
+      features: data.features,
+      recommendations
+    };
+  });
+}
+
+export async function applyHairstyle(base64Image: string, hairstyleName: string): Promise<string> {
+  // 384px is extremely fast and still clear enough for a preview
+  const resizedImage = await resizeImage(base64Image, 384);
+  
+  return retryWithBackoff(async () => {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-image",
+      contents: {
         parts: [
           {
             inlineData: {
               mimeType: "image/jpeg",
-              data: base64Image.split(',')[1],
+              data: resizedImage.split(',')[1],
             },
           },
           {
-            text: `Analyze this face for hairstyle recommendations. 
-            Identify the face shape (oval, round, square, heart, diamond).
-            Analyze the jawline, forehead width, face length, and hairline.
-            Provide suitability scores (0-100) and reasons for each of these hairstyles: ${HAIRSTYLES.map(h => h.name).join(', ')}.
-            Return the result in JSON format.`,
+            text: `Apply a realistic ${hairstyleName} hairstyle. Keep face and background same. Natural blend.`,
           },
         ],
       },
-    ],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          faceShape: { type: Type.STRING, enum: ['oval', 'round', 'square', 'heart', 'diamond'] },
-          features: {
-            type: Type.OBJECT,
-            properties: {
-              jawline: { type: Type.STRING },
-              forehead: { type: Type.STRING },
-              faceLength: { type: Type.STRING },
-              hairline: { type: Type.STRING },
-            },
-            required: ['jawline', 'forehead', 'faceLength', 'hairline'],
-          },
-          recommendations: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                suitability: { type: Type.NUMBER },
-                reason: { type: Type.STRING },
-              },
-              required: ['name', 'suitability', 'reason'],
-            },
-          },
-        },
-        required: ['faceShape', 'features', 'recommendations'],
-      },
-    },
-  });
+    });
 
-  const data = JSON.parse(response.text);
-  
-  // Map recommendations back to HAIRSTYLES
-  const recommendations: Hairstyle[] = HAIRSTYLES.map(h => {
-    const rec = data.recommendations.find((r: any) => r.name === h.name);
-    return {
-      ...h,
-      suitability: rec?.suitability || 0,
-      reason: rec?.reason || 'Recommended based on your face shape.'
-    };
-  }).sort((a, b) => b.suitability - a.suitability);
-
-  return {
-    faceShape: data.faceShape as FaceShape,
-    features: data.features,
-    recommendations
-  };
-}
-
-export async function applyHairstyle(base64Image: string, hairstyleName: string): Promise<string> {
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-image",
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            mimeType: "image/jpeg",
-            data: base64Image.split(',')[1],
-          },
-        },
-        {
-          text: `Apply a realistic ${hairstyleName} hairstyle to the person in this image. 
-          The new hairstyle should look natural, matching their hair color and blending seamlessly with their face. 
-          Maintain all original facial features, skin tone, and background. 
-          The result should look like a professional salon photo.`,
-        },
-      ],
-    },
-  });
-
-  for (const part of response.candidates[0].content.parts) {
-    if (part.inlineData) {
-      return `data:image/png;base64,${part.inlineData.data}`;
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
     }
-  }
-
-  throw new Error("Failed to generate styled image");
+    
+    throw new Error("No image generated in response");
+  });
 }

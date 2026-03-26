@@ -17,7 +17,9 @@ export function Results() {
   const [selectedStyle, setSelectedStyle] = React.useState<Hairstyle | null>(null);
   const [styledImage, setStyledImage] = React.useState<string | null>(null);
   const [isGenerating, setIsGenerating] = React.useState(false);
+  const [retryCount, setRetryCount] = React.useState(0);
   const [isSaved, setIsSaved] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     const storedResult = sessionStorage.getItem('analysisResult');
@@ -34,16 +36,38 @@ export function Results() {
 
   const handleApplyStyle = async (style: Hairstyle) => {
     if (!userImage) return;
+    
     setSelectedStyle(style);
     setIsGenerating(true);
+    setRetryCount(0);
     setStyledImage(null);
     setIsSaved(false);
+    setError(null);
+    
+    // Start a timer to update retry count for visual feedback
+    const timer = setInterval(() => {
+      setRetryCount(prev => prev + 1);
+    }, 5000);
+
     try {
       const styled = await applyHairstyle(userImage, style.name);
       setStyledImage(styled);
-    } catch (err) {
-      console.error(err);
+      setError(null);
+    } catch (err: any) {
+      const isRetryable = err?.message?.includes('429') || 
+                          err?.message?.includes('RESOURCE_EXHAUSTED') || 
+                          err?.message?.includes('AI_BUSY') || 
+                          err?.message?.includes('quota') ||
+                          err?.message?.includes('timeout') ||
+                          err?.message?.includes('deadline');
+      
+      if (isRetryable) {
+        setError("The AI server is very busy right now. Please wait a few seconds and try clicking 'Try Again'. We've optimized the system to be more persistent.");
+      } else {
+        setError("Failed to apply style. Please try a different photo or style.");
+      }
     } finally {
+      clearInterval(timer);
       setIsGenerating(false);
     }
   };
@@ -222,7 +246,19 @@ export function Results() {
                         className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm z-20"
                       >
                         <Loader2 className="w-12 h-12 text-gold animate-spin mb-4" />
-                        <p className="text-gold font-bold animate-pulse">Styling your hair...</p>
+                        <p className="text-gold font-bold animate-pulse">
+                          {retryCount > 4 ? "Still working, please stay with us..." : "Crafting your perfect look..."}
+                        </p>
+                        <p className="text-[10px] text-white/40 mt-2 px-8 text-center">
+                          {retryCount > 4 
+                            ? "Our AI is under heavy load but we are retrying automatically. This might take up to a minute." 
+                            : "Our AI is meticulously blending the style for a realistic result. This usually takes 10-20 seconds."}
+                        </p>
+                        {retryCount > 2 && (
+                          <div className="mt-4 px-4 py-1 bg-gold/10 border border-gold/20 rounded-full">
+                            <p className="text-[10px] text-gold font-bold uppercase tracking-widest">Attempt {Math.min(retryCount, 50)}</p>
+                          </div>
+                        )}
                       </motion.div>
                     ) : styledImage ? (
                       <motion.img
@@ -248,14 +284,32 @@ export function Results() {
                   {!styledImage && !isGenerating && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-black/40">
                       <Sparkles className="w-12 h-12 text-gold/50 mb-4" />
-                      <h3 className="text-xl font-bold mb-2">Select a Style</h3>
-                      <p className="text-white/50 text-sm">Click on any recommended hairstyle to see the AI transformation.</p>
-                      <button 
-                        onClick={() => handleApplyStyle(selectedStyle!)}
-                        className="btn-gold mt-6 py-2 px-8 text-sm"
-                      >
-                        Apply {selectedStyle?.name}
-                      </button>
+                      {error ? (
+                        <div className="space-y-4 px-6">
+                          <h3 className="text-xl font-bold text-red-400">Oops!</h3>
+                          <p className="text-white/50 text-sm">{error}</p>
+                          <div className="flex flex-col gap-2">
+                            <button 
+                              onClick={() => handleApplyStyle(selectedStyle!)}
+                              className="btn-gold py-2 px-8 text-sm"
+                            >
+                              Try Again
+                            </button>
+                            <p className="text-[10px] text-white/30">If it takes too long, try refreshing or using a different photo.</p>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <h3 className="text-xl font-bold mb-2">Select a Style</h3>
+                          <p className="text-white/50 text-sm">Click on any recommended hairstyle to see the AI transformation.</p>
+                          <button 
+                            onClick={() => handleApplyStyle(selectedStyle!)}
+                            className="btn-gold mt-6 py-2 px-8 text-sm"
+                          >
+                            Apply {selectedStyle?.name}
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
 
